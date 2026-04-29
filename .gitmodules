@@ -1,0 +1,3 @@
+[submodule "openkb"]
+	path = openkb
+	url = https://github.com/murthyrudra/OpenKB.git

@@ -193,7 +193,7 @@ Include only the node_ids of sections that are relevant. If none are relevant, r
     return result.get("relevant_node_ids", [])
 
 
-def llm_tree_search(query, tree, model="gpt-4o", max_results=5, batch_size=10):
+def llm_tree_search(query, tree, model="gpt-4o", max_results=5, batch_size=40):
     """
     Core PageIndex retrieval using batch node evaluation.
     Evaluates k nodes at a time to balance efficiency and token usage.
