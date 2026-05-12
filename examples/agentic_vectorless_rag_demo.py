@@ -97,7 +97,7 @@ _EXAMPLES_DIR = Path(__file__).parent
 WORKSPACE = _EXAMPLES_DIR / "workspace"
 
 AGENT_SYSTEM_PROMPT = """
-You are PageIndex, a document QA assistant.
+You are PageIndex, an agentic document QA assistant.
 
 The document is organized as a hierarchical tree of nodes.
 Each node contains:
@@ -106,28 +106,92 @@ Each node contains:
 - optional child nodes
 - retrievable full text content
 
-TOOL USE RULES:
-1. Always begin with get_document() to confirm the document status and metadata.
-2. Then call get_document_structure() to inspect the hierarchy, summaries, and relevant node_ids.
-3. Use summaries and hierarchy to narrow down the most relevant node_ids before retrieving content.
-4. Retrieve content only with get_node_content(node_ids="...").
-5. Fetch only the minimum necessary nodes:
-   - Prefer specific node_ids
-   - Use small comma-separated sets
-   - Avoid broad retrieval
-   - Never retrieve the entire document unless explicitly requested
-6. Before every tool call, briefly explain why the tool is needed in one short sentence.
-7. Base answers strictly on retrieved tool output.
-8. If the structure is insufficient to answer confidently, retrieve additional nearby or child nodes incrementally.
-9. If the answer cannot be found in retrieved nodes, explicitly say so instead of guessing.
-10. Be concise, factual, and cite relevant node_ids when useful.
+Your task is to answer questions accurately using iterative retrieval, structural reasoning, and compressed working memory.
+
+========================
+TOOL USAGE RULES
+========================
+
+1. Always begin with:
+   - get_document()
+   to verify document status and metadata.
+
+2. Then call:
+   - get_document_structure()
+   to inspect hierarchy, summaries, and node_ids.
+
+3. Use summaries and hierarchy to identify the most relevant node_ids before retrieving full content.
+
+4. Retrieve content only with:
+   - get_node_content(node_ids="...")
+
+5. Retrieve the minimum necessary content:
+   - prefer precise node_ids
+   - use small comma-separated node sets
+   - avoid broad retrieval
+   - never retrieve the full document unless explicitly requested
+
+6. Before every tool call:
+   - briefly explain why the tool is needed in one short sentence
+
+7. Base answers strictly on retrieved content.
+
+8. If retrieved content is insufficient:
+   - iteratively retrieve nearby, parent, sibling, or child nodes
+
+9. If the answer cannot be found:
+   - explicitly say so
+   - never fabricate information
+
+========================
+WORKING MEMORY RULES
+========================
+
+You have limited working memory.
+
+DO NOT accumulate large amounts of raw retrieved text.
+
+After retrieving substantial node content:
+- call summarize_findings()
+- use the compressed summary for subsequent reasoning
+- avoid accumulating raw retrieved text
+
+Discard:
+- repetitive details
+- verbose examples
+- irrelevant information
+- duplicated explanations
+
+Use compressed working memory for future reasoning and retrieval decisions instead of retaining raw node text.
+
+When retrieval spans multiple iterations:
+- continuously refine and update working memory
+- prefer incremental summarization
+- avoid context accumulation
+
+========================
+RETRIEVAL STRATEGY
+========================
+
+Prefer this retrieval pattern:
+
+1. Inspect structure
+2. Retrieve targeted nodes
+3. Compress findings into working memory
+4. Refine retrieval using compressed memory
+5. Repeat only if necessary
+6. Produce grounded final answer
 
 Example retrieval flow:
 - get_document()
 - get_document_structure()
-- get_node_content(node_ids="12,15,15.2")
+- get_node_content(node_ids="12,15")
+- summarize findings internally
+- get_node_content(node_ids="15.2")
+- refine working memory
+- answer
 
-Do not fabricate document content or node relationships.
+Do not fabricate node relationships or document content.
 """
 
 
@@ -145,34 +209,6 @@ def query_agent(
     Streams text output token-by-token and returns the full answer string.
     Tool calls are always printed; verbose=True also prints arguments and output previews.
     """
-
-    @function_tool
-    def get_document() -> str:
-        """Get document metadata: status, page count, name, and description."""
-        return client.get_document(doc_id)
-
-    @function_tool
-    def get_document_structure() -> str:
-        """Get the document's full tree structure (without text) to find relevant sections."""
-        return client.get_document_structure(doc_id)
-
-    @function_tool
-    def get_page_content(pages: str) -> str:
-        """
-        Get the text content of specific pages or line numbers.
-        Use tight ranges: e.g. '5-7' for pages 5 to 7, '3,8' for pages 3 and 8, '12' for page 12.
-        For Markdown documents, use line numbers from the structure's line_num field.
-        """
-        return client.get_page_content(doc_id, pages)
-
-    @function_tool
-    def get_node_content(nodes: str) -> str:
-        """
-        Get the text content of specific nodes.
-        Use tight ranges: e.g. '5-7' for nodes 5 to 7, '3,8' for nodes 3 and 8, '12' for page 12.
-        For Markdown documents, use line numbers from the structure's line_num field.
-        """
-        return client.get_node_content(doc_id, nodes)
 
     from openai import OpenAI, AsyncOpenAI
     from agents import OpenAIChatCompletionsModel
@@ -225,6 +261,84 @@ def query_agent(
         openai_client=async_client,
     )
 
+    @function_tool
+    def get_document() -> str:
+        """Get document metadata: status, page count, name, and description."""
+        return client.get_document(doc_id)
+
+    @function_tool
+    def get_document_structure() -> str:
+        """Get the document's full tree structure (without text) to find relevant sections."""
+        return client.get_document_structure(doc_id)
+
+    @function_tool
+    def get_page_content(pages: str) -> str:
+        """
+        Get the text content of specific pages or line numbers.
+        Use tight ranges: e.g. '5-7' for pages 5 to 7, '3,8' for pages 3 and 8, '12' for page 12.
+        For Markdown documents, use line numbers from the structure's line_num field.
+        """
+        return client.get_page_content(doc_id, pages)
+
+    @function_tool
+    def get_node_content(nodes: str) -> str:
+        """
+        Get the text content of specific nodes.
+        Use tight ranges: e.g. '5-7' for nodes 5 to 7, '3,8' for nodes 3 and 8, '12' for page 12.
+        For Markdown documents, use line numbers from the structure's line_num field.
+        """
+        return client.get_node_content(doc_id, nodes)
+
+    @function_tool
+    async def summarize_findings(findings: str) -> str:
+        """
+        Compress retrieved evidence into concise working memory.
+
+        Preserve:
+        - important concepts
+        - node_ids
+        - key relationships
+        - unresolved questions
+        """
+
+        prompt = f"""
+You are compressing retrieved document evidence into concise working memory.
+
+Preserve:
+- important concepts
+- node_ids
+- key relationships
+- unresolved questions
+
+Remove:
+- repetition
+- verbose examples
+- filler details
+
+Retrieved Evidence:
+{findings}
+
+Return concise working memory bullets.
+"""
+
+        response = await async_client.chat.completions.create(
+            model=model_name.split("hosted_vllm/")[-1],
+            messages=[
+                {
+                    "role": "system",
+                    "content": ("You compress retrieval evidence into concise memory."),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            temperature=0.2,
+            max_tokens=64000,
+        )
+
+        return response.choices[0].message.content
+
     agent = Agent(
         name="PageIndex",
         instructions=AGENT_SYSTEM_PROMPT,
@@ -233,6 +347,7 @@ def query_agent(
             get_document_structure,
             get_node_content,
             get_page_content,
+            summarize_findings,
         ],
         model=model,
         model_settings=ModelSettings(
@@ -261,10 +376,12 @@ def query_agent(
                     args = getattr(raw, "arguments", "{}")
                     args_str = f"({args})" if verbose else ""
                     current_stream_kind = None
+                    print(raw)
                 elif item.type == "tool_call_output_item" and verbose:
                     output = str(item.output)
                     preview = output
                     current_stream_kind = None
+                    print(output[:200])
 
         translated_answer = await translate_text(
             str(streamed_run.final_output), "Telugu"
