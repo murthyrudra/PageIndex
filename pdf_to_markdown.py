@@ -37,7 +37,7 @@ def convert_folder_to_markdown(input_folder, output_folder):
 
 
 if __name__ == "__main__":
-    input_folder = "data/"  # change this
+    input_folder = "data/rag/"  # change this
     output_folder = "data_markdown/"  # change this
 
     convert_folder_to_markdown(input_folder, output_folder)

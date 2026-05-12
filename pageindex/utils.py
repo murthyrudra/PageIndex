@@ -56,6 +56,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
         "model": model,
         "messages": messages,
         "temperature": 0,
+        "max_tokens": 128000,
     }
 
     # Add RITS-specific configuration if using RITS models
@@ -140,6 +141,9 @@ async def llm_acompletion(model, prompt):
             "RITS_API_KEY": rits_api_key,
             "reasoning_effort": "high",
         }
+
+    if "RITS_MODEL" in config:
+        completion_kwargs["model"] = config["RITS_MODEL"]
 
     # Log configuration for debugging
     for i in range(max_retries):

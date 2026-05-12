@@ -387,12 +387,14 @@ def apply_precomputed_summaries(structure, summaries_dict):
         for node in nodes:
             node_id = node.get("node_id")
 
-            summaries_nodes = summaries_dict["structure"]
+            summaries_nodes = summaries_dict
 
             nodes_ids_to_summaries = {}
 
             for each_node in summaries_nodes:
-                nodes_ids_to_summaries[each_node["node_id"]] = each_node
+                nodes_ids_to_summaries[summaries_nodes[each_node]["node_id"]] = (
+                    summaries_nodes[each_node]
+                )
             if node_id and node_id in nodes_ids_to_summaries:
 
                 summary_data = nodes_ids_to_summaries[node_id]
@@ -425,7 +427,7 @@ async def md_to_tree(
     md_path,
     if_thinning=False,
     min_token_threshold=None,
-    if_add_node_summary="no",
+    if_add_node_summary="yes",
     summary_token_threshold=None,
     model=None,
     if_add_doc_description="no",

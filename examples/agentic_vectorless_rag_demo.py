@@ -18,6 +18,8 @@ Steps:
 
 Requirements: pip install openai-agents
 """
+
+from typing import Any
 import sys
 import json
 import asyncio
@@ -30,15 +32,53 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agents import Agent, Runner, function_tool, set_tracing_disabled
 from agents.model_settings import ModelSettings
 from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
-from openai.types.responses import ResponseTextDeltaEvent, ResponseReasoningSummaryTextDeltaEvent
+from openai.types.responses import (
+    ResponseTextDeltaEvent,
+    ResponseReasoningSummaryTextDeltaEvent,
+)
 
-from pageindex import PageIndexClient
+from pageindex.client import PageIndexClient
 import pageindex.utils as utils
 
-PDF_URL = "https://arxiv.org/pdf/2603.15031"
+
+def _setup_llm_key(kb_dir: Path):
+    """Set LiteLLM API key from LLM_API_KEY env var if present.
+
+    Load order (override=False, so first one wins):
+    1. System environment variables (already set)
+    2. KB-local .env  (kb_dir/.env)
+    3. Global .env    (~/.config/openkb/.env)
+
+    Also propagates to provider-specific env vars (OPENAI_API_KEY, etc.)
+    so that the Agents SDK litellm provider can pick them up.
+    """
+    import os
+    from dotenv import dotenv_values
+
+    env_file = os.path.join(kb_dir, ".env")
+
+    config = dotenv_values(env_file)
+
+    completion_kwargs = {}
+
+    if "RITS_API_BASE" in config:
+        completion_kwargs["RITS_API_BASE"] = config["RITS_API_BASE"]
+
+    if "RITS_API_KEY" in config:
+        completion_kwargs["RITS_API_KEY"] = config["RITS_API_KEY"]
+
+    if "RITS_EMBEDDING_MODEL_URL" in config:
+        completion_kwargs["RITS_EMBEDDING_MODEL_URL"] = config[
+            "RITS_EMBEDDING_MODEL_URL"
+        ]
+
+    if "RITS_EMBEDDING_MODEL" in config:
+        completion_kwargs["RITS_EMBEDDING_MODEL"] = config["RITS_EMBEDDING_MODEL"]
+
+    return completion_kwargs, config["RITS_MODEL"]
+
 
 _EXAMPLES_DIR = Path(__file__).parent
-PDF_PATH = _EXAMPLES_DIR / "documents" / "attention-residuals.pdf"
 WORKSPACE = _EXAMPLES_DIR / "workspace"
 
 AGENT_SYSTEM_PROMPT = """
@@ -52,7 +92,14 @@ Answer based only on tool output. Be concise.
 """
 
 
-def query_agent(client: PageIndexClient, doc_id: str, prompt: str, verbose: bool = False) -> str:
+def query_agent(
+    client: PageIndexClient,
+    doc_id: str,
+    prompt: str,
+    verbose: bool = False,
+    model_name: str = "",
+    completion_kwargs: dict = {},
+) -> str:
     """Run a document QA agent using the OpenAI Agents SDK.
 
     Streams text output token-by-token and returns the full answer string.
@@ -78,12 +125,29 @@ def query_agent(client: PageIndexClient, doc_id: str, prompt: str, verbose: bool
         """
         return client.get_page_content(doc_id, pages)
 
+    from openai import AsyncOpenAI
+    from agents import OpenAIChatCompletionsModel
+
+    async_client: AsyncOpenAI = AsyncOpenAI(
+        api_key="dummy",  # vLLM usually ignores this
+        base_url=completion_kwargs["RITS_API_BASE"],
+        default_headers={"RITS_API_KEY": completion_kwargs["RITS_API_KEY"]},
+    )
+
+    model = OpenAIChatCompletionsModel(
+        model=model_name.split("hosted_vllm/")[-1],
+        openai_client=async_client,
+    )
+
     agent = Agent(
         name="PageIndex",
         instructions=AGENT_SYSTEM_PROMPT,
         tools=[get_document, get_document_structure, get_page_content],
-        model=client.retrieve_model,
-        # model_settings=ModelSettings(reasoning={"effort": "low", "summary": "auto"}),  # Uncomment to enable reasoning
+        model=model,
+        model_settings=ModelSettings(
+            reasoning={"effort": "low", "summary": "auto"},
+            max_tokens=128000,
+        ),  # Uncomment to enable reasoning
     )
 
     async def _run():
@@ -140,49 +204,45 @@ if __name__ == "__main__":
 
     set_tracing_disabled(True)
 
-    # Download PDF if needed
-    if not PDF_PATH.exists():
-        print(f"Downloading {PDF_URL} ...")
-        PDF_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with requests.get(PDF_URL, stream=True, timeout=30) as r:
-            r.raise_for_status()
-            with open(PDF_PATH, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-        print("Download complete.\n")
-
     # Setup
-    client = PageIndexClient(workspace=WORKSPACE)
+    completion_kwargs, model_name = _setup_llm_key(Path("."))
+
+    pageindex_client: Any | PageIndexClient = PageIndexClient(
+        api_key="dummy",  # vLLM usually ignores this
+        rits_api_key=completion_kwargs["RITS_API_KEY"],
+        model=model_name.split("hosted_vllm/")[-1],
+        workspace=str(WORKSPACE),
+    )
 
     # Step 1: Index PDF and view tree structure
-    print("=" * 60)
-    print("Step 1: Index PDF and view tree structure")
-    print("=" * 60)
-    doc_id = next(
-        (did for did, doc in client.documents.items() if doc.get('doc_name') == PDF_PATH.name),
-        None,
+
+    doc_id = pageindex_client.index(
+        "data/sarvam_output_md_orientation_corrected_translated.md"
     )
-    if doc_id:
-        print(f"\nLoaded cached doc_id: {doc_id}")
-    else:
-        doc_id = client.index(PDF_PATH)
-        print(f"\nIndexed. doc_id: {doc_id}")
-    print("\nTree Structure (top-level sections):")
-    structure = json.loads(client.get_document_structure(doc_id))
-    utils.print_tree(structure)
+
+    # print(f"\nIndexed. doc_id: {doc_id}")
+    # print("\nTree Structure (top-level sections):")
+    # structure = json.loads(pageindex_client.get_document_structure(doc_id))
+    # utils.print_tree(structure)
 
     # Step 2: View document metadata
-    print("\n" + "=" * 60)
-    print("Step 2: View document metadata")
-    print("=" * 60)
-    doc_metadata = client.get_document(doc_id)
-    print(f"\n{doc_metadata}")
+    # print("\n" + "=" * 60)
+    # print("Step 2: View document metadata")
+    # print("=" * 60)
+    # doc_metadata = pageindex_client.get_document(doc_id)
+    # print(f"\n{doc_metadata}")
 
     # Step 3: Agent Query
     print("\n" + "=" * 60)
     print("Step 3: Agent Query (auto tool-use)")
     print("=" * 60)
-    question = "Explain Attention Residuals in simple language."
+    question = "Where are the bio-control production centers located?"
     print(f"\nQuestion: '{question}'")
-    query_agent(client, doc_id, question, verbose=True)
+    query_agent(
+        pageindex_client,
+        doc_id,
+        question,
+        verbose=True,
+        model_name=model_name,
+        completion_kwargs=completion_kwargs,
+    )
