@@ -26,6 +26,7 @@ import asyncio
 import concurrent.futures
 from pathlib import Path
 import requests
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -39,6 +40,20 @@ from openai.types.responses import (
 
 from pageindex.client import PageIndexClient
 import pageindex.utils as utils
+
+translate_instructions = """
+You are an expert multilingual agricultural translator.
+
+Rules:
+- Preserve crop names.
+- Preserve mandi/market names.
+- Preserve state names.
+- Preserve prices and units exactly.
+- Preserve percentages exactly.
+- Preserve markdown formatting.
+- Only translate human language text.
+- Return only translated text.
+"""
 
 
 def _setup_llm_key(kb_dir: Path):
@@ -83,12 +98,36 @@ WORKSPACE = _EXAMPLES_DIR / "workspace"
 
 AGENT_SYSTEM_PROMPT = """
 You are PageIndex, a document QA assistant.
-TOOL USE:
-- Call get_document() first to confirm status and page/line count.
-- Call get_document_structure() to identify relevant page ranges.
-- Call get_page_content(pages="5-7") with tight ranges; never fetch the whole document.
-- Before each tool call, output one short sentence explaining the reason.
-Answer based only on tool output. Be concise.
+
+The document is organized as a hierarchical tree of nodes.
+Each node contains:
+- a unique node_id
+- a summary
+- optional child nodes
+- retrievable full text content
+
+TOOL USE RULES:
+1. Always begin with get_document() to confirm the document status and metadata.
+2. Then call get_document_structure() to inspect the hierarchy, summaries, and relevant node_ids.
+3. Use summaries and hierarchy to narrow down the most relevant node_ids before retrieving content.
+4. Retrieve content only with get_node_content(node_ids="...").
+5. Fetch only the minimum necessary nodes:
+   - Prefer specific node_ids
+   - Use small comma-separated sets
+   - Avoid broad retrieval
+   - Never retrieve the entire document unless explicitly requested
+6. Before every tool call, briefly explain why the tool is needed in one short sentence.
+7. Base answers strictly on retrieved tool output.
+8. If the structure is insufficient to answer confidently, retrieve additional nearby or child nodes incrementally.
+9. If the answer cannot be found in retrieved nodes, explicitly say so instead of guessing.
+10. Be concise, factual, and cite relevant node_ids when useful.
+
+Example retrieval flow:
+- get_document()
+- get_document_structure()
+- get_node_content(node_ids="12,15,15.2")
+
+Do not fabricate document content or node relationships.
 """
 
 
@@ -99,6 +138,7 @@ def query_agent(
     verbose: bool = False,
     model_name: str = "",
     completion_kwargs: dict = {},
+    target_language: str = "English",
 ) -> str:
     """Run a document QA agent using the OpenAI Agents SDK.
 
@@ -125,9 +165,55 @@ def query_agent(
         """
         return client.get_page_content(doc_id, pages)
 
-    from openai import AsyncOpenAI
+    @function_tool
+    def get_node_content(nodes: str) -> str:
+        """
+        Get the text content of specific nodes.
+        Use tight ranges: e.g. '5-7' for nodes 5 to 7, '3,8' for nodes 3 and 8, '12' for page 12.
+        For Markdown documents, use line numbers from the structure's line_num field.
+        """
+        return client.get_node_content(doc_id, nodes)
+
+    from openai import OpenAI, AsyncOpenAI
     from agents import OpenAIChatCompletionsModel
 
+    ### Translation Agent
+    translation_client = AsyncOpenAI(
+        api_key="dummy",  # vLLM usually ignores this
+        base_url=completion_kwargs["RITS_API_BASE"],
+        default_headers={"RITS_API_KEY": completion_kwargs["RITS_API_KEY"]},
+    )
+
+    translation_model = OpenAIChatCompletionsModel(
+        model=model_name.split("hosted_vllm/")[-1],
+        openai_client=translation_client,
+    )
+
+    translation_agent = Agent(
+        name="wiki-query",
+        instructions=translate_instructions,
+        model=translation_model,
+        model_settings=ModelSettings(parallel_tool_calls=False, max_tokens=128000),
+    )
+
+    async def translate_text(
+        text: str,
+        target_language: str,
+    ) -> str:
+
+        result = await Runner.run(
+            translation_agent,
+            f"""
+        Translate the following text into {target_language}.
+
+        TEXT:
+        {text}
+        """,
+        )
+
+        return result.final_output or text
+
+    ### PageIndex Agent
     async_client: AsyncOpenAI = AsyncOpenAI(
         api_key="dummy",  # vLLM usually ignores this
         base_url=completion_kwargs["RITS_API_BASE"],
@@ -142,7 +228,12 @@ def query_agent(
     agent = Agent(
         name="PageIndex",
         instructions=AGENT_SYSTEM_PROMPT,
-        tools=[get_document, get_document_structure, get_page_content],
+        tools=[
+            get_document,
+            get_document_structure,
+            get_node_content,
+            get_page_content,
+        ],
         model=model,
         model_settings=ModelSettings(
             reasoning={"effort": "low", "summary": "auto"},
@@ -151,46 +242,34 @@ def query_agent(
     )
 
     async def _run():
-        streamed_run = Runner.run_streamed(agent, prompt)
+        translated_question = await translate_text(prompt, target_language)
+
+        streamed_run = Runner.run_streamed(agent, translated_question)
         current_stream_kind = None
         async for event in streamed_run.stream_events():
             if isinstance(event, RawResponsesStreamEvent):
                 if isinstance(event.data, ResponseReasoningSummaryTextDeltaEvent):
-                    if current_stream_kind != "reasoning":
-                        if current_stream_kind is not None:
-                            print()
-                        print("\n[reasoning]: ", end="", flush=True)
                     delta = event.data.delta
-                    print(delta, end="", flush=True)
                     current_stream_kind = "reasoning"
                 elif isinstance(event.data, ResponseTextDeltaEvent):
-                    if current_stream_kind != "text":
-                        if current_stream_kind is not None:
-                            print()
-                        print("\n[text]: ", end="", flush=True)
                     delta = event.data.delta
-                    print(delta, end="", flush=True)
                     current_stream_kind = "text"
             elif isinstance(event, RunItemStreamEvent):
                 item = event.item
                 if item.type == "tool_call_item":
-                    if current_stream_kind is not None:
-                        print()
                     raw = item.raw_item
                     args = getattr(raw, "arguments", "{}")
                     args_str = f"({args})" if verbose else ""
-                    print(f"\n[tool call]: {raw.name}{args_str}", flush=True)
                     current_stream_kind = None
                 elif item.type == "tool_call_output_item" and verbose:
-                    if current_stream_kind is not None:
-                        print()
                     output = str(item.output)
-                    preview = output[:200] + "..." if len(output) > 200 else output
-                    print(f"\n[tool call output]: {preview}", flush=True)
+                    preview = output
                     current_stream_kind = None
-        if current_stream_kind is not None:
-            print()
-        return "" if not streamed_run.final_output else str(streamed_run.final_output)
+
+        translated_answer = await translate_text(
+            str(streamed_run.final_output), "Telugu"
+        )
+        return translated_answer
 
     try:
         asyncio.get_running_loop()
@@ -220,29 +299,52 @@ if __name__ == "__main__":
         "data/sarvam_output_md_orientation_corrected_translated.md"
     )
 
-    # print(f"\nIndexed. doc_id: {doc_id}")
-    # print("\nTree Structure (top-level sections):")
-    # structure = json.loads(pageindex_client.get_document_structure(doc_id))
-    # utils.print_tree(structure)
+    print(f"\nIndexed. doc_id: {doc_id}")
+    print("\nTree Structure (top-level sections):")
+    structure = json.loads(pageindex_client.get_document_structure(doc_id))
+    utils.print_tree(structure)
 
     # Step 2: View document metadata
-    # print("\n" + "=" * 60)
-    # print("Step 2: View document metadata")
-    # print("=" * 60)
-    # doc_metadata = pageindex_client.get_document(doc_id)
-    # print(f"\n{doc_metadata}")
+    print("\n" + "=" * 60)
+    print("Step 2: View document metadata")
+    print("=" * 60)
+    doc_metadata = pageindex_client.get_document(doc_id)
+    print(f"\n{doc_metadata}")
 
     # Step 3: Agent Query
-    print("\n" + "=" * 60)
-    print("Step 3: Agent Query (auto tool-use)")
-    print("=" * 60)
-    question = "Where are the bio-control production centers located?"
-    print(f"\nQuestion: '{question}'")
-    query_agent(
-        pageindex_client,
-        doc_id,
-        question,
-        verbose=True,
-        model_name=model_name,
-        completion_kwargs=completion_kwargs,
+    TEST_FILE = (
+        "../IRL-Indic-RAG/data/ap-agri-summarization-qa-gpt-oss-120b/splits/test.jsonl"
     )
+    with open(TEST_FILE, "r", encoding="utf-8") as f:
+        test_data = []
+        for line in f:
+            test_data.append(json.loads(line.strip()))
+
+    results = []
+    for each_instance in tqdm(test_data):
+        final_output = query_agent(
+            pageindex_client,
+            doc_id,
+            each_instance["question"],
+            verbose=True,
+            model_name=model_name,
+            completion_kwargs=completion_kwargs,
+        )
+
+        temp = {}
+        temp["question"] = each_instance["question"]
+        temp["answer"] = each_instance["answer"]
+        each_instance["generated_answer"] = final_output
+        results.append(temp)
+
+    with open(
+        "page_index_answers.json",
+        "w",
+        encoding="utf-8",
+    ) as f:
+        json.dump(
+            results,
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )

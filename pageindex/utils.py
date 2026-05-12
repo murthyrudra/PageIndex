@@ -684,12 +684,28 @@ def add_node_text_with_labels(node, pdf_pages):
 
 
 async def generate_node_summary(node, model=None):
-    prompt = f"""You are given a part of a document, your task is to generate a description of the partial document about what are main points covered in the partial document.
+    prompt = f"""
+You are given a partial document chunk from a larger document.
 
-    Partial Document Text: {node['text']}
-    
-    Directly return the description, do not include any other text.
-    """
+Your task is to generate a concise but information-dense summary describing:
+- the main topics covered
+- important concepts
+- key entities, methods, algorithms, or findings
+- the overall purpose of this section
+
+Guidelines:
+- Preserve important technical terminology.
+- Do not omit critical concepts.
+- Keep the summary grounded strictly in the provided text.
+- Avoid repetition and unnecessary detail.
+- Write the summary as a coherent paragraph.
+- Do not mention that this is a "partial document" or "chunk".
+
+Document Text:
+{node['text']}
+
+Return only the summary.
+"""
     response = await llm_acompletion(model, prompt)
     return response
 

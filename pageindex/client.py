@@ -9,7 +9,12 @@ import PyPDF2
 
 from .page_index import page_index
 from .page_index_md import md_to_tree
-from .retrieve import get_document, get_document_structure, get_page_content
+from .retrieve import (
+    get_document,
+    get_document_structure,
+    get_page_content,
+    get_node_content,
+)
 from .utils import ConfigLoader, remove_fields
 
 META_INDEX = "_meta.json"
@@ -251,3 +256,9 @@ class PageIndexClient:
         if self.workspace:
             self._ensure_doc_loaded(doc_id)
         return get_page_content(self.documents, doc_id, pages)
+
+    def get_node_content(self, doc_id: str, nodes: str) -> str:
+        """Return node content for the given nodes string (e.g. '5-7', '3,8', '12')."""
+        if self.workspace:
+            self._ensure_doc_loaded(doc_id)
+        return get_node_content(self.documents, doc_id, nodes)
