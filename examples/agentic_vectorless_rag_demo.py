@@ -97,101 +97,13 @@ _EXAMPLES_DIR = Path(__file__).parent
 WORKSPACE = _EXAMPLES_DIR / "workspace"
 
 AGENT_SYSTEM_PROMPT = """
-You are PageIndex, an agentic document QA assistant.
-
-The document is organized as a hierarchical tree of nodes.
-Each node contains:
-- a unique node_id
-- a summary
-- optional child nodes
-- retrievable full text content
-
-Your task is to answer questions accurately using iterative retrieval, structural reasoning, and compressed working memory.
-
-========================
-TOOL USAGE RULES
-========================
-
-1. Always begin with:
-   - get_document()
-   to verify document status and metadata.
-
-2. Then call:
-   - get_document_structure()
-   to inspect hierarchy, summaries, and node_ids.
-
-3. Use summaries and hierarchy to identify the most relevant node_ids before retrieving full content.
-
-4. Retrieve content only with:
-   - get_node_content(node_ids="...")
-
-5. Retrieve the minimum necessary content:
-   - prefer precise node_ids
-   - use small comma-separated node sets
-   - avoid broad retrieval
-   - never retrieve the full document unless explicitly requested
-
-6. Before every tool call:
-   - briefly explain why the tool is needed in one short sentence
-
-7. Base answers strictly on retrieved content.
-
-8. If retrieved content is insufficient:
-   - iteratively retrieve nearby, parent, sibling, or child nodes
-
-9. If the answer cannot be found:
-   - explicitly say so
-   - never fabricate information
-
-========================
-WORKING MEMORY RULES
-========================
-
-You have limited working memory.
-
-DO NOT accumulate large amounts of raw retrieved text.
-
-After retrieving substantial node content:
-- call summarize_findings()
-- use the compressed summary for subsequent reasoning
-- avoid accumulating raw retrieved text
-
-Discard:
-- repetitive details
-- verbose examples
-- irrelevant information
-- duplicated explanations
-
-Use compressed working memory for future reasoning and retrieval decisions instead of retaining raw node text.
-
-When retrieval spans multiple iterations:
-- continuously refine and update working memory
-- prefer incremental summarization
-- avoid context accumulation
-
-========================
-RETRIEVAL STRATEGY
-========================
-
-Prefer this retrieval pattern:
-
-1. Inspect structure
-2. Retrieve targeted nodes
-3. Compress findings into working memory
-4. Refine retrieval using compressed memory
-5. Repeat only if necessary
-6. Produce grounded final answer
-
-Example retrieval flow:
-- get_document()
-- get_document_structure()
-- get_node_content(node_ids="12,15")
-- summarize findings internally
-- get_node_content(node_ids="15.2")
-- refine working memory
-- answer
-
-Do not fabricate node relationships or document content.
+You are PageIndex, a document QA assistant.
+TOOL USE:
+- Call get_document() first to confirm status and page/line count.
+- Call get_document_structure() to identify relevant page ranges.
+- Call get_page_content(pages="5-7") with tight ranges; never fetch the whole document.
+- Before each tool call, output one short sentence explaining the reason.
+Answer based only on tool output. Be concise.
 """
 
 
@@ -280,78 +192,16 @@ def query_agent(
         """
         return client.get_page_content(doc_id, pages)
 
-    @function_tool
-    def get_node_content(nodes: str) -> str:
-        """
-        Get the text content of specific nodes.
-        Use tight ranges: e.g. '5-7' for nodes 5 to 7, '3,8' for nodes 3 and 8, '12' for page 12.
-        For Markdown documents, use line numbers from the structure's line_num field.
-        """
-        return client.get_node_content(doc_id, nodes)
-
-    @function_tool
-    async def summarize_findings(findings: str) -> str:
-        """
-        Compress retrieved evidence into concise working memory.
-
-        Preserve:
-        - important concepts
-        - node_ids
-        - key relationships
-        - unresolved questions
-        """
-
-        prompt = f"""
-You are compressing retrieved document evidence into concise working memory.
-
-Preserve:
-- important concepts
-- node_ids
-- key relationships
-- unresolved questions
-
-Remove:
-- repetition
-- verbose examples
-- filler details
-
-Retrieved Evidence:
-{findings}
-
-Return concise working memory bullets.
-"""
-
-        response = await async_client.chat.completions.create(
-            model=model_name.split("hosted_vllm/")[-1],
-            messages=[
-                {
-                    "role": "system",
-                    "content": ("You compress retrieval evidence into concise memory."),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            temperature=0.2,
-            max_tokens=64000,
-        )
-
-        return response.choices[0].message.content
-
     agent = Agent(
         name="PageIndex",
         instructions=AGENT_SYSTEM_PROMPT,
         tools=[
             get_document,
             get_document_structure,
-            get_node_content,
             get_page_content,
-            summarize_findings,
         ],
         model=model,
         model_settings=ModelSettings(
-            reasoning={"effort": "low", "summary": "auto"},
             max_tokens=128000,
         ),  # Uncomment to enable reasoning
     )
