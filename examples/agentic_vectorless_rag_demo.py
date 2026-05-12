@@ -141,7 +141,7 @@ def query_agent(
         name="wiki-query",
         instructions=translate_instructions,
         model=translation_model,
-        model_settings=ModelSettings(parallel_tool_calls=False, max_tokens=128000),
+        model_settings=ModelSettings(parallel_tool_calls=False, max_tokens=16000),
     )
 
     async def translate_text(
@@ -202,7 +202,7 @@ def query_agent(
         ],
         model=model,
         model_settings=ModelSettings(
-            max_tokens=128000,
+            max_tokens=16000,
         ),  # Uncomment to enable reasoning
     )
 
