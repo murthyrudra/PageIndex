@@ -20,23 +20,34 @@ async def get_node_summary(node, summary_token_threshold=200, model=None):
 
 
 async def generate_summaries_for_structure_md(
-    structure, summary_token_threshold, model=None
+    structure,
+    summary_token_threshold,
+    model=None,
+    max_concurrent=5,
+    sleep_time=1.0,
 ):
     nodes = structure_to_list(structure)
     total_nodes = len(nodes)
+
+    import asyncio
+
+    semaphore = asyncio.Semaphore(max_concurrent)
 
     # Create a progress bar for real-time tracking
     pbar = tqdm(total=total_nodes, desc="Generating summaries", unit="node")
 
     # Wrapper to update progress bar after each completion
     async def generate_with_progress(node):
-        summary = await get_node_summary(
-            node, summary_token_threshold=summary_token_threshold, model=model
-        )
-        # Update progress bar with current node title
-        pbar.set_postfix({"node": node.get("title", "Untitled")[:40]}, refresh=True)
-        pbar.update(1)
-        return summary
+        async with semaphore:
+            await asyncio.sleep(sleep_time)
+
+            summary = await get_node_summary(
+                node, summary_token_threshold=summary_token_threshold, model=model
+            )
+            # Update progress bar with current node title
+            pbar.set_postfix({"node": node.get("title", "Untitled")[:40]}, refresh=True)
+            pbar.update(1)
+            return summary
 
     # Create tasks with progress tracking
     tasks = [generate_with_progress(node) for node in nodes]
@@ -430,7 +441,7 @@ async def md_to_tree(
     if_add_node_summary="yes",
     summary_token_threshold=None,
     model=None,
-    if_add_doc_description="no",
+    if_add_doc_description="yes",
     if_add_node_text="no",
     if_add_node_id="yes",
     use_precomputed_summaries=True,
@@ -556,17 +567,17 @@ async def md_to_tree(
                 ],
             )
 
-        # if if_add_doc_description == "yes":
-        #     print(f"Generating document description...")
-        #     # Create a clean structure without unnecessary fields for description generation
-        #     clean_structure = create_clean_structure_for_description(tree_structure)
-        #     doc_description = generate_doc_description(clean_structure, model=model)
-        #     return {
-        #         "doc_name": os.path.splitext(os.path.basename(md_path))[0],
-        #         "doc_description": doc_description,
-        #         "line_count": line_count,
-        #         "structure": tree_structure,
-        #     }
+        if if_add_doc_description == "yes":
+            print(f"Generating document description...")
+            # Create a clean structure without unnecessary fields for description generation
+            clean_structure = create_clean_structure_for_description(tree_structure)
+            doc_description = generate_doc_description(clean_structure, model=model)
+            return {
+                "doc_name": os.path.splitext(os.path.basename(md_path))[0],
+                "doc_description": doc_description,
+                "line_count": line_count,
+                "structure": tree_structure,
+            }
     else:
         # No summaries needed, format based on text preference
         if if_add_node_text == "yes":

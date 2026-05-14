@@ -82,10 +82,15 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
             "reasoning_effort": "high",
         }
 
+    if "RITS_MODEL" in config:
+        completion_kwargs["model"] = config["RITS_MODEL"]
+
     for i in range(max_retries):
         try:
             response = litellm.completion(**completion_kwargs)
             content = response.choices[0].message.content
+
+            content = content.split("</think>")[-1]
             if return_finish_reason:
                 finish_reason = (
                     "max_output_reached"
