@@ -363,7 +363,7 @@ Examples:
   python run_rag.py --tree results/document_structure.json --query "What is machine learning?"
   
   # With RITS model
-  python run_rag.py --tree results/doc.json --query "Explain the concept" --model "hosted_vllm/sarvamai/sarvam-105b"
+  python3 run_rag.py --tree results/sarvam_output_md_orientation_corrected_structure.json --query "Explain the concept" --model "hosted_vllm/sarvamai/sarvam-105b"
   
   # Quiet mode
   python run_rag.py --tree results/doc.json --query "Summary?" --quiet

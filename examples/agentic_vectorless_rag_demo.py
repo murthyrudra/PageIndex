@@ -125,42 +125,6 @@ def query_agent(
     from openai import OpenAI, AsyncOpenAI
     from agents import OpenAIChatCompletionsModel
 
-    ### Translation Agent
-    translation_client = AsyncOpenAI(
-        api_key="dummy",  # vLLM usually ignores this
-        base_url=completion_kwargs["RITS_API_BASE"],
-        default_headers={"RITS_API_KEY": completion_kwargs["RITS_API_KEY"]},
-    )
-
-    translation_model = OpenAIChatCompletionsModel(
-        model=model_name.split("hosted_vllm/")[-1],
-        openai_client=translation_client,
-    )
-
-    translation_agent = Agent(
-        name="wiki-query",
-        instructions=translate_instructions,
-        model=translation_model,
-        model_settings=ModelSettings(parallel_tool_calls=False, max_tokens=16000),
-    )
-
-    async def translate_text(
-        text: str,
-        target_language: str,
-    ) -> str:
-
-        result = await Runner.run(
-            translation_agent,
-            f"""
-        Translate the following text into {target_language}.
-
-        TEXT:
-        {text}
-        """,
-        )
-
-        return result.final_output or text
-
     ### PageIndex Agent
     async_client: AsyncOpenAI = AsyncOpenAI(
         api_key="dummy",  # vLLM usually ignores this
@@ -207,9 +171,8 @@ def query_agent(
     )
 
     async def _run():
-        translated_question = await translate_text(prompt, target_language)
 
-        streamed_run = Runner.run_streamed(agent, translated_question)
+        streamed_run = Runner.run_streamed(agent, prompt)
         current_stream_kind = None
         async for event in streamed_run.stream_events():
             if isinstance(event, RawResponsesStreamEvent):
@@ -226,17 +189,14 @@ def query_agent(
                     args = getattr(raw, "arguments", "{}")
                     args_str = f"({args})" if verbose else ""
                     current_stream_kind = None
-                    print(raw)
+                    # print(raw)
                 elif item.type == "tool_call_output_item" and verbose:
                     output = str(item.output)
                     preview = output
                     current_stream_kind = None
-                    print(output[:200])
+                    # print(output[:200])
 
-        translated_answer = await translate_text(
-            str(streamed_run.final_output), "Telugu"
-        )
-        return translated_answer
+        return str(streamed_run.final_output)
 
     try:
         asyncio.get_running_loop()
@@ -262,9 +222,7 @@ if __name__ == "__main__":
 
     # Step 1: Index PDF and view tree structure
 
-    doc_id = pageindex_client.index(
-        "data/sarvam_output_md_orientation_corrected_translated.md"
-    )
+    doc_id = pageindex_client.index("data/sarvam_output_md_orientation_corrected.md")
 
     print(f"\nIndexed. doc_id: {doc_id}")
     print("\nTree Structure (top-level sections):")
@@ -289,14 +247,18 @@ if __name__ == "__main__":
 
     results = []
     for each_instance in tqdm(test_data):
-        final_output = query_agent(
-            pageindex_client,
-            doc_id,
-            each_instance["question"],
-            verbose=True,
-            model_name=model_name,
-            completion_kwargs=completion_kwargs,
-        )
+        try:
+            final_output = query_agent(
+                pageindex_client,
+                doc_id,
+                each_instance["question"],
+                verbose=True,
+                model_name=model_name,
+                completion_kwargs=completion_kwargs,
+            )
+            print(final_output)
+        except:
+            final_output = ""
 
         temp = {}
         temp["question"] = each_instance["question"]
