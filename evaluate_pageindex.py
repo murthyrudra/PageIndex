@@ -1,24 +1,3 @@
-"""
-Agentic Vectorless RAG with PageIndex - Demo
-
-A simple example of building a document QA agent with self-hosted PageIndex
-and the OpenAI Agents SDK. Instead of vector similarity search and chunking,
-PageIndex builds a hierarchical tree index and uses agentic LLM reasoning for
-human-like, context-aware retrieval.
-
-Agent tools:
-  - get_document()           — document metadata (status, page count, etc.)
-  - get_document_structure() — tree structure index of a document
-  - get_page_content()       — retrieve text content of specific pages
-
-Steps:
-  1 — Index a PDF and view its tree structure index
-  2 — View document metadata
-  3 — Ask a question (agent reasons over the index and auto-calls tools)
-
-Requirements: pip install openai-agents
-"""
-
 from typing import Any, List
 import sys
 import re
@@ -94,19 +73,55 @@ _EXAMPLES_DIR = Path(__file__).parent
 WORKSPACE = _EXAMPLES_DIR / "workspace"
 
 AGENT_SYSTEM_PROMPT = """
-You are PageIndex, a document QA assistant.
-TOOL USE:
-- Call get_document() first to confirm status and page/line count.
-- Call get_document_structure() to identify relevant page ranges.
-- Call get_page_content(pages="5-7") with tight ranges; never fetch the whole document.
-- Before each tool call, output one short sentence explaining the reason.
-Answer based only on tool output. Be concise.
+You are PageIndex, a document-grounded QA assistant.
+
+Your job is to answer questions ONLY using information retrieved from tools.
+Never use prior knowledge or make assumptions.
+
+WORKFLOW:
+1. Call get_documents(query="...", top_k=10) first using the user's question as the query.
+2. get_documents performs semantic dense retrieval.
+3. Only use returned documents for further exploration.
+4. Use get_document(doc_id="") only when you need metadata validation.
+5. Use get_document_structure(doc_id="") to locate relevant sections/pages.
+6. Use get_page_content(doc_id="", pages="") ONLY for the smallest relevant ranges.
+7. NEVER retrieve an entire document unless explicitly requested.
+8. If the retrieved documents do not contain the answer, increase the top_k value in get_documents(query="...", top_k=10)
+9. Never retrieve more than 100 documents
+10. If the answer is not found, say:
+   "I could not find sufficient evidence in the indexed documents."
+
+TOOL USAGE RULES:
+- Before every tool call, briefly explain why you are calling it in ONE sentence.
+- Prefer narrow retrieval:
+  - Good: "12", "15-17", "3,8"
+  - Bad: "1-100"
+- Do not repeat the same tool call with identical arguments.
+- Do not fetch irrelevant sections.
+- Use document structure before page retrieval whenever possible.
+
+ANSWERING RULES:
+- Answer ONLY from retrieved evidence.
+- Be concise and factual.
+- Cite supporting page ranges when available.
+- If evidence is ambiguous, explicitly mention uncertainty.
+- Do not expose internal reasoning.
+- Do not mention tools unless necessary.
+
+MULTI-DOCUMENT QUESTIONS:
+- Compare evidence across documents carefully.
+- Mention which document supports each claim.
+- If documents conflict, state the conflict clearly.
+
+OUTPUT STYLE:
+- Short direct answer first.
+- Then provide concise supporting evidence.
+- Use bullet points when useful.
 """
 
 
 def query_agent(
     client: PageIndexClient,
-    doc_ids: List[str],
     prompt: str,
     verbose: bool = False,
     model_name: str = "",
@@ -135,6 +150,53 @@ def query_agent(
     )
 
     @function_tool
+    def get_documents(query: str, top_k: int = 100) -> str:
+        """
+        Perform dense semantic search over indexed documents and
+        return metadata for the most relevant documents.
+
+        Args:
+            query: Natural language search query.
+            top_k: Number of documents to retrieve.
+        """
+
+        print(f"[Dense Search] query={query} with topk={top_k}")
+
+        try:
+            # Dense semantic retrieval
+            search_results = client.search(
+                query=query,
+                top_k=top_k,
+            )
+
+            if not search_results:
+                return "No relevant documents found."
+
+            retrieved_docs = []
+
+            for result in search_results:
+                # Adjust based on your actual PageIndex result schema
+                doc_id = result["doc_id"] if isinstance(result, dict) else result.doc_id
+
+                score = (
+                    result.get("score", None)
+                    if isinstance(result, dict)
+                    else getattr(result, "score", None)
+                )
+
+                metadata = client.get_document(doc_id)
+
+                if score is not None:
+                    retrieved_docs.append(f"[Score: {score:.4f}]\n{metadata}")
+                else:
+                    retrieved_docs.append(metadata)
+
+            return "\n\n".join(retrieved_docs)
+
+        except Exception as e:
+            return f"Dense retrieval failed: {str(e)}"
+
+    @function_tool
     def get_document(doc_id) -> str:
         """Get document metadata: status, page count, name, and description."""
         return client.get_document(doc_id)
@@ -145,7 +207,7 @@ def query_agent(
         return client.get_document_structure(doc_id)
 
     @function_tool
-    def get_page_content(pages: str) -> str:
+    def get_page_content(doc_id, pages: str) -> str:
         """
         Get the text content of specific pages or line numbers.
         Use tight ranges: e.g. '5-7' for pages 5 to 7, '3,8' for pages 3 and 8, '12' for page 12.
@@ -153,31 +215,11 @@ def query_agent(
         """
         return client.get_page_content(doc_id, pages)
 
-    @function_tool
-    def list_documents() -> str:
-        """
-        Return all indexed documents with descriptions.
-        """
-
-        docs = client.list_documents()
-
-        results = []
-
-        for d in docs:
-            results.append(
-                {
-                    "doc_id": d["doc_id"],
-                    "title": d.get("title", ""),
-                    "description": d.get("description", ""),
-                }
-            )
-
-        return json.dumps(results, indent=2)
-
     agent = Agent(
         name="PageIndex",
         instructions=AGENT_SYSTEM_PROMPT,
         tools=[
+            get_documents,
             get_document,
             get_document_structure,
             get_page_content,
@@ -207,12 +249,12 @@ def query_agent(
                     args = getattr(raw, "arguments", "{}")
                     args_str = f"({args})" if verbose else ""
                     current_stream_kind = None
-                    print(raw)
+                    # print(raw)
                 elif item.type == "tool_call_output_item" and verbose:
                     output = str(item.output)
                     preview = output
                     current_stream_kind = None
-                    print(output[:200])
+                    # print(output[:200])
 
         return streamed_run.final_output
 
@@ -256,77 +298,88 @@ if __name__ == "__main__":
         api_key="dummy",  # vLLM usually ignores this
         rits_api_key=completion_kwargs["RITS_API_KEY"],
         model=model_name.split("hosted_vllm/")[-1],
+        retrieve_model=completion_kwargs["RITS_EMBEDDING_MODEL"],
+        retrieval_model_url=completion_kwargs["RITS_EMBEDDING_MODEL_URL"],
         workspace=str(WORKSPACE),
     )
 
     # Step 1: Index PDF and view tree structure
-    corpus_path = f"/Users/rudramurthy/Documents/GitHub/HippoRAG/reproduce/{args.filepath}_corpus.json"
+    corpus_path = f"../HippoRAG/reproduce/{args.filepath}_corpus.json"
 
     with open(corpus_path, "r", errors="ignore", encoding="utf8") as reader:
         documents = json.load(reader)
 
     os.makedirs("temp", exist_ok=True)
 
-    doc_ids = []
+    test = True
 
-    for each_doc in tqdm(documents):
-        title = safe_filename(each_doc["title"])
-        text = each_doc["text"]
+    if not test:
+        doc_ids = []
 
-        with open(f"temp/{title}.md", "w", errors="ignore", encoding="utf8") as writer:
-            writer.write(f"# {title}\n")
-            writer.write(f"{text}")
-            writer.close()
+        for each_doc in tqdm(documents):
+            title = safe_filename(each_doc["title"])
+            text = each_doc["text"]
 
-        doc_id = pageindex_client.index(f"temp/{title}.md")
-        doc_ids.append(doc_id)
+            with open(
+                f"temp/{title}.md", "w", errors="ignore", encoding="utf8"
+            ) as writer:
+                writer.write(f"# {title}\n")
+                writer.write(f"{text}")
+                writer.close()
 
-    # Step 2: Evaluate on Test Set
-    TEST_FILE = (
-        f"/Users/rudramurthy/Documents/GitHub/HippoRAG/reproduce/{args.filepath}.json"
-    )
-    test_instances = []
-    with open(TEST_FILE, "r", encoding="utf-8") as f:
-        samples = json.load(f)
+            doc_id = pageindex_client.index(f"temp/{title}.md")
+            doc_ids.append(doc_id)
+    else:
+        pageindex_client._load_workspace()
 
-    for each_sample in samples:
-        instance = {}
-        instance["question"] = each_sample["question"]
-        instance["answer"] = each_sample["answer"]
-        test_instances.append(instance)
+        pageindex_client.build_dense_index()
 
-    # results = []
-    # for each_instance in tqdm(test_instances):
-    #     final_output = query_agent(
-    #         pageindex_client,
-    #         doc_id,
-    #         each_instance["question"],
-    #         verbose=True,
-    #         model_name=model_name,
-    #         completion_kwargs=completion_kwargs,
-    #     )
+        doc_id = list(pageindex_client.documents.keys())
 
-    #     temp = {}
-    #     temp["question"] = each_instance["question"]
-    #     temp["answer"] = each_instance["answer"]
-    #     each_instance["generated_answer"] = final_output
-    #     results.append(temp)
+        # Step 2: Evaluate on Test Set
+        TEST_FILE = f"../HippoRAG/reproduce/{args.filepath}.json"
+        test_instances = []
+        with open(TEST_FILE, "r", encoding="utf-8") as f:
+            samples = json.load(f)
 
-    # # Create output directory if it doesn't exist
-    # os.makedirs(args.output_dir, exist_ok=True)
+        for each_sample in samples:
+            instance = {}
+            instance["question"] = each_sample["question"]
+            instance["answer"] = each_sample["answer"]
+            test_instances.append(instance)
 
-    # # Save results to the specified output directory
-    # output_file = os.path.join(args.output_dir, "page_index_answers.json")
-    # with open(
-    #     output_file,
-    #     "w",
-    #     encoding="utf-8",
-    # ) as f:
-    #     json.dump(
-    #         results,
-    #         f,
-    #         indent=2,
-    #         ensure_ascii=False,
-    #     )
+        results = []
+        for each_instance in tqdm(test_instances):
+            final_output = query_agent(
+                pageindex_client,
+                each_instance["question"],
+                verbose=True,
+                model_name=model_name,
+                completion_kwargs=completion_kwargs,
+            )
 
-    # print(f"\nResults saved to: {output_file}")
+            temp = {}
+            temp["question"] = each_instance["question"]
+            temp["answer"] = each_instance["answer"]
+            temp["generated_answer"] = final_output
+            results.append(temp)
+            print(temp)
+
+        # Create output directory if it doesn't exist
+        os.makedirs(args.output_dir, exist_ok=True)
+
+        # Save results to the specified output directory
+        output_file = os.path.join(args.output_dir, "page_index_answers.json")
+        with open(
+            output_file,
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(
+                results,
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+
+        print(f"\nResults saved to: {output_file}")

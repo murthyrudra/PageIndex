@@ -4,8 +4,10 @@ import json
 import asyncio
 import concurrent.futures
 from pathlib import Path
-
+import numpy as np
+from tqdm import tqdm
 import PyPDF2
+from openai import OpenAI
 
 from .page_index import page_index
 from .page_index_md import md_to_tree
@@ -43,6 +45,7 @@ class PageIndexClient:
         api_key: str = None,
         model: str = None,
         retrieve_model: str = None,
+        retrieval_model_url: str = None,
         workspace: str = None,
         rits_api_key: str = None,
     ):
@@ -59,6 +62,8 @@ class PageIndexClient:
             # If no RITS key but OpenAI key exists, models will use OpenAI key
             pass
 
+        self.rits_api_key = rits_api_key
+
         self.workspace = Path(workspace).expanduser() if workspace else None
         overrides = {}
         if model:
@@ -67,14 +72,20 @@ class PageIndexClient:
             overrides["retrieve_model"] = retrieve_model
         opt = ConfigLoader().load(overrides or None)
         self.model = opt.model
-        self.retrieve_model = _normalize_retrieve_model(
-            opt.retrieve_model or self.model
-        )
+        self.retrieve_model = opt.retrieve_model
+        self.retrieve_model_url = retrieval_model_url
         if self.workspace:
             self.workspace.mkdir(parents=True, exist_ok=True)
         self.documents = {}
         if self.workspace:
             self._load_workspace()
+
+        self.embedding_client = OpenAI(
+            api_key="dummy",
+            base_url=self.retrieve_model_url,
+        )
+
+        self.doc_embeddings = {}
 
     def index(self, file_path: str, mode: str = "auto") -> str:
         """Index a document. Returns a document_id."""
@@ -262,3 +273,134 @@ class PageIndexClient:
         if self.workspace:
             self._ensure_doc_loaded(doc_id)
         return get_node_content(self.documents, doc_id, nodes)
+
+    def _embed(self, text: str) -> np.ndarray:
+        """
+        Generate dense embedding for text.
+        """
+
+        response = self.embedding_client.embeddings.create(
+            model=self.retrieve_model,
+            input=text,
+            extra_headers={"RITS_API_KEY": self.rits_api_key},
+        )
+
+        embedding = response.data[0].embedding
+        return np.array(embedding, dtype=np.float32)
+
+    def _cosine_similarity(
+        self,
+        a: np.ndarray,
+        b: np.ndarray,
+    ) -> float:
+        """
+        Cosine similarity between two vectors.
+        """
+
+        denom = np.linalg.norm(a) * np.linalg.norm(b)
+
+        if denom == 0:
+            return 0.0
+
+        return float(np.dot(a, b) / denom)
+
+    def build_dense_index(self):
+        """
+        Build dense index only if it does not already exist.
+        Saves embeddings inside:
+            {workspace}/dense_index/
+        """
+
+        index_dir = Path(self.workspace) / "dense_index"
+
+        embeddings_file = index_dir / "embeddings.npy"
+        doc_ids_file = index_dir / "doc_ids.json"
+
+        # ---------------------------------------------------
+        # Load existing index
+        # ---------------------------------------------------
+        if embeddings_file.exists() and doc_ids_file.exists():
+
+            print("Loading existing dense index...")
+
+            embeddings = np.load(embeddings_file)
+
+            with open(doc_ids_file, "r", encoding="utf-8") as f:
+                doc_ids = json.load(f)
+
+            self.doc_embeddings = {
+                doc_id: embeddings[i] for i, doc_id in enumerate(doc_ids)
+            }
+
+            print(f"Loaded dense index with " f"{len(self.doc_embeddings)} documents.")
+
+            return
+
+        # ---------------------------------------------------
+        # Build new index
+        # ---------------------------------------------------
+        print("Building dense index...")
+
+        index_dir.mkdir(parents=True, exist_ok=True)
+
+        self.doc_embeddings = {}
+
+        all_embeddings = []
+        all_doc_ids = []
+
+        for doc_id, doc_data in tqdm(self.documents.items()):
+
+            text = doc_data["doc_description"]
+
+            embedding = self._embed(text)
+
+            self.doc_embeddings[doc_id] = embedding
+
+            all_embeddings.append(embedding)
+            all_doc_ids.append(doc_id)
+
+        # Convert to matrix
+        embedding_matrix = np.stack(all_embeddings)
+
+        # Save to disk
+        np.save(embeddings_file, embedding_matrix)
+
+        with open(doc_ids_file, "w", encoding="utf-8") as f:
+            json.dump(all_doc_ids, f, ensure_ascii=False, indent=2)
+
+        print(f"Built and saved dense index for " f"{len(all_doc_ids)} documents.")
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+    ):
+        """
+        Dense semantic retrieval.
+        Returns top-k most similar documents.
+        """
+
+        query_embedding = self._embed(query)
+
+        scores = []
+
+        for doc_id, doc_embedding in self.doc_embeddings.items():
+
+            score = self._cosine_similarity(
+                query_embedding,
+                doc_embedding,
+            )
+
+            scores.append(
+                {
+                    "doc_id": doc_id,
+                    "score": score,
+                }
+            )
+
+        scores.sort(
+            key=lambda x: x["score"],
+            reverse=True,
+        )
+
+        return scores[:top_k]
