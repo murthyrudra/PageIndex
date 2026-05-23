@@ -92,6 +92,12 @@ if __name__ == "__main__":
         default="yes",
         help="Whether to use precomputed summaries if available (markdown only)",
     )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="output",
+        help="Output folder path",
+    )
     args = parser.parse_args()
 
     # Validate that exactly one file type is specified
@@ -126,7 +132,7 @@ if __name__ == "__main__":
 
         # Save results
         pdf_name = os.path.splitext(os.path.basename(args.pdf_path))[0]
-        output_dir = "./results"
+        output_dir = args.output_dir
         output_file = f"{output_dir}/{pdf_name}_structure.json"
         os.makedirs(output_dir, exist_ok=True)
 
@@ -186,7 +192,7 @@ if __name__ == "__main__":
 
         # Save results
         md_name = os.path.splitext(os.path.basename(args.md_path))[0]
-        output_dir = "./results"
+        output_dir = args.output_dir
         output_file = f"{output_dir}/{md_name}_structure.json"
         os.makedirs(output_dir, exist_ok=True)
 

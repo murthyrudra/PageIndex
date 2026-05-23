@@ -207,7 +207,9 @@ if __name__ == "__main__":
 
     # Step 1: Index PDF and view tree structure
 
-    doc_id = pageindex_client.index("data/musique/musique_paragraphs.json.md")
+    doc_id = pageindex_client.index(
+        "data/AnNCFAlignedDesignFrameworkforAI-PoweredLearning.pdf"
+    )
 
     print(f"\nIndexed. doc_id: {doc_id}")
     print("\nTree Structure (top-level sections):")
@@ -221,36 +223,14 @@ if __name__ == "__main__":
     doc_metadata = pageindex_client.get_document(doc_id)
     print(f"\n{doc_metadata}")
 
-    # # Step 3: Agent Query
-    TEST_FILE = "data/musique/musique_qa_pairs.json"
-    with open(TEST_FILE, "r", encoding="utf-8") as f:
-        test_data = json.load(f)
+    # Step 3: Agent Query
+    final_output = query_agent(
+        pageindex_client,
+        doc_id,
+        "What is this document talking about?",
+        verbose=True,
+        model_name=model_name,
+        completion_kwargs=completion_kwargs,
+    )
 
-    # results = []
-    # for each_instance in tqdm(test_data):
-    #     final_output = query_agent(
-    #         pageindex_client,
-    #         doc_id,
-    #         each_instance["question"],
-    #         verbose=True,
-    #         model_name=model_name,
-    #         completion_kwargs=completion_kwargs,
-    #     )
-
-    #     temp = {}
-    #     temp["question"] = each_instance["question"]
-    #     temp["answer"] = each_instance["answer"]
-    #     each_instance["generated_answer"] = final_output
-    #     results.append(temp)
-
-    # with open(
-    #     "page_index_answers.json",
-    #     "w",
-    #     encoding="utf-8",
-    # ) as f:
-    #     json.dump(
-    #         results,
-    #         f,
-    #         indent=2,
-    #         ensure_ascii=False,
-    #     )
+    print(final_output)

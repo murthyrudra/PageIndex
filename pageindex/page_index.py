@@ -23,6 +23,8 @@ async def check_title_appearance(item, page_list, start_index=1, model=None):
     page_number = item["physical_index"]
     page_text = page_list[page_number - start_index][0]
 
+    page_text = safe_truncate_text(page_text)
+
     prompt = f"""
     Your job is to check if the given section appears or starts in the given page_text.
 

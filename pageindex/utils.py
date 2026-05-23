@@ -18,6 +18,12 @@ import yaml
 from pathlib import Path
 from types import SimpleNamespace as config
 
+
+try:
+    from docling.document_converter import DocumentConverter
+except ImportError:
+    DocumentConverter = None
+
 # Backward compatibility: support CHATGPT_API_KEY as alias for OPENAI_API_KEY
 if not os.getenv("OPENAI_API_KEY") and os.getenv("CHATGPT_API_KEY"):
     os.environ["OPENAI_API_KEY"] = os.getenv("CHATGPT_API_KEY")
@@ -122,6 +128,7 @@ async def llm_acompletion(model, prompt):
         "model": model,
         "messages": messages,
         "temperature": 0,
+        "max_tokens": 128000,
     }
 
     # Add RITS-specific configuration if using RITS models
@@ -510,6 +517,30 @@ def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
             token_length = litellm.token_counter(model=model, text=page_text)
             page_list.append((page_text, token_length))
         return page_list
+    elif pdf_parser == "Docling":
+        if DocumentConverter is None:
+            raise ImportError(
+                "Docling is not installed. " "Install with: pip install docling"
+            )
+
+        if not isinstance(pdf_path, str):
+            raise ValueError("Docling currently expects a file path string")
+
+        converter = DocumentConverter()
+        result = converter.convert(pdf_path)
+
+        page_list = []
+
+        # Iterate page-wise
+        for page_no, page in result.document.pages.items():
+            page_text = page.export_to_text()
+
+            token_length = litellm.token_counter(model=model, text=page_text)
+
+            page_list.append((page_text, token_length))
+
+        return page_list
+
     else:
         raise ValueError(f"Unsupported PDF parser: {pdf_parser}")
 
@@ -846,3 +877,117 @@ def print_tree(tree, indent=0):
 def print_wrapped(text, width=100):
     for line in text.splitlines():
         print(textwrap.fill(line, width=width))
+
+
+def llm_encode(text):
+    """
+    Wrapper around litellm.encode with the same model handling
+    logic as llm_completion.
+    """
+    from dotenv import dotenv_values
+
+    # Override model if configured
+    config = dotenv_values(".env")
+
+    completion_kwargs = {}
+
+    if "RITS_API_KEY" in config:
+        rits_api_key = config["RITS_API_KEY"]
+
+    if "RITS_API_BASE" in config:
+        rits_api_base = config["RITS_API_BASE"]
+
+    if rits_api_key:
+        completion_kwargs["api_key"] = rits_api_key
+        # Add RITS_API_KEY as extra header for RITS models
+        completion_kwargs["extra_headers"] = {
+            "RITS_API_KEY": rits_api_key,
+        }
+
+    model = config["RITS_MODEL"]
+
+    return litellm.encode(
+        model=model,
+        text=text,
+        **completion_kwargs,
+    )
+
+
+def llm_decode(tokens):
+    """
+    Wrapper around litellm.decode with the same model handling
+    logic as llm_completion.
+    """
+    from dotenv import dotenv_values
+
+    completion_kwargs = {}
+
+    # Override model if configured
+    config = dotenv_values(".env")
+
+    if "RITS_API_KEY" in config:
+        rits_api_key = config["RITS_API_KEY"]
+
+    if "RITS_API_BASE" in config:
+        rits_api_base = config["RITS_API_BASE"]
+
+    if rits_api_key:
+        completion_kwargs["api_key"] = rits_api_key
+        # Add RITS_API_KEY as extra header for RITS models
+        completion_kwargs["extra_headers"] = {
+            "RITS_API_KEY": rits_api_key,
+        }
+
+    model = config["RITS_MODEL"]
+
+    return litellm.decode(model=model, tokens=tokens, **completion_kwargs)
+
+
+def llm_token_count(text):
+    """
+    Wrapper around litellm.token_counter
+    """
+    from dotenv import dotenv_values
+
+    completion_kwargs = {}
+
+    # Override model if configured
+    config = dotenv_values(".env")
+
+    if "RITS_API_KEY" in config:
+        rits_api_key = config["RITS_API_KEY"]
+
+    if "RITS_API_BASE" in config:
+        rits_api_base = config["RITS_API_BASE"]
+
+    if rits_api_base:
+        completion_kwargs["api_base"] = rits_api_base
+
+    if rits_api_key:
+        completion_kwargs["api_key"] = rits_api_key
+        # Add RITS_API_KEY as extra header for RITS models
+        completion_kwargs["extra_headers"] = {
+            "RITS_API_KEY": rits_api_key,
+        }
+
+    model = config["RITS_MODEL"]
+
+    return litellm.token_counter(
+        model=model,
+        text=text,
+        **completion_kwargs,
+    )
+
+
+def safe_truncate_text(text, max_tokens=100000):
+    """
+    Safely truncate text to fit within token limits.
+    """
+    tokens = llm_encode(text)
+
+    if len(tokens) <= max_tokens:
+        return text
+
+    truncated_tokens = tokens[:max_tokens]
+
+    return llm_decode(truncated_tokens)
